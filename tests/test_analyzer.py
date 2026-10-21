@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from shared_context.analyzer import Signals, analyze_transcript, detect_restatement
+from shared_context.analyzer import Signals, analyze_transcript, bash_context_paths, detect_restatement
 from shared_context.repodetect import detect_repo, hash_path, normalize_path
 
 
@@ -86,6 +86,15 @@ def test_signals_from_transcript(tmp_path: Path) -> None:
 def test_missing_transcript_is_empty(tmp_path: Path) -> None:
     sig = analyze_transcript(tmp_path / "nope.jsonl", None)
     assert sig.tool_counts == {} and sig.first_edit_at is None
+
+
+def test_bash_context_paths() -> None:
+    assert bash_context_paths("cat src/a.py") == ["src/a.py"]
+    assert bash_context_paths("rg 'retry' src/") == ["src/"]
+    assert bash_context_paths("git -C /repo diff -- src/a.py") == ["/repo", "src/a.py"]
+    assert bash_context_paths("ls -la") == []
+    assert bash_context_paths("echo hello") == []
+    assert bash_context_paths("npm run build") == []
 
 
 def test_signals_merge_prefers_cumulative() -> None:

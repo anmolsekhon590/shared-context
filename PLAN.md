@@ -241,6 +241,8 @@ Build only the capture spine: episode recorder + a standalone store + the event 
 - Every metric baseline recorded here becomes the counterfactual for Phase 1. No external logs, no time-diary surveys.
 Deliverable: a working recorder plus the numbers — not a slide deck.
 
+**Status: BUILT** (commit `2cb6f7e`). Server ingest + CLI + Claude Code hooks + local analyzer + report; 10 unit tests and a 16-check end-to-end smoke test. Runbook and decision gates: [`docs/PHASE0.md`](docs/PHASE0.md). Remaining requirement: a pilot repo and 2+ engineers.
+
 **Phase 1 — MVP (4 weeks)**
 C1 Episode capture + C2 Materialization + C3 Structural index for one repo/stack · Postgres (episodes, derivations, index) · Claude Code hooks · CLI (`login/materialize/get/remember/index/export`) · ACL inheritance · tiny MCP surface · docker-compose · baseline metrics report · eval sets in CI.
 

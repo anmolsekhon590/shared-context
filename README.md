@@ -13,6 +13,7 @@ retrieval or injection yet.
 
 - Plan and evidence: [`PLAN.md`](PLAN.md), [`docs/design/`](docs/design/),
   [`docs/inspiration/`](docs/inspiration/)
+- **Phase 0 runbook + H1 decision gates: [`docs/PHASE0.md`](docs/PHASE0.md)**
 - Data model: [`docs/design/02-data-model.md`](docs/design/02-data-model.md)
 - Wire contract: [`docs/design/01-boundary-and-protocol.md`](docs/design/01-boundary-and-protocol.md)
 

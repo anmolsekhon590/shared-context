@@ -31,6 +31,9 @@ PATH_SOURCES = {"Read": "reads", "Grep": "searches", "Glob": "searches", "Edit":
 
 MAX_TRANSCRIPT_BYTES = 20 * 1024 * 1024
 
+BASH_PATH_COMMANDS = {"cat", "head", "tail", "wc", "file", "tree", "ls", "find", "bat", "less", "more"}
+BASH_SEARCH_COMMANDS = {"rg", "grep", "ag", "ack"}
+
 # Conservative, explainable restatement rules. No model, no prompt text stored.
 RESTATEMENT_RULES: list[tuple[str, re.Pattern, float]] = [
     ("as_i_said", re.compile(r"\b(as|like) (i|we) (said|mentioned|discussed|talked about)\b", re.I), 0.9),
@@ -100,6 +103,44 @@ def detect_restatement(text: str, prompt_index: int) -> tuple[str | None, float]
     return None, 0.0
 
 
+def _looks_like_path(token: str) -> bool:
+    if token.startswith("-") or not token:
+        return False
+    return "/" in token or token.startswith(".") or "." in Path(token).name
+
+
+def bash_context_paths(command: str) -> list[str]:
+    """Paths a read-only command inspected. Conservative: only obvious path
+    arguments, so the re-derivation metric is not polluted by flags/patterns."""
+    import shlex
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return []
+    if not parts:
+        return []
+    head = Path(parts[0]).name
+    args = [p for p in parts[1:] if not p.startswith("-")]
+
+    if head in BASH_PATH_COMMANDS:
+        if head == "ls" and not args:
+            return []
+        return args[:8]
+    if head in BASH_SEARCH_COMMANDS:
+        # first non-flag arg is the pattern; the rest are candidate paths
+        return [p for p in args[1:] if _looks_like_path(p)][:8]
+    if head == "git":
+        paths: list[str] = []
+        for i, part in enumerate(parts):
+            if part == "-C" and i + 1 < len(parts):
+                paths.append(parts[i + 1])
+            if part == "--":
+                paths.extend(parts[i + 1 :])
+        return [p for p in paths if _looks_like_path(p)][:8]
+    return []
+
+
 def _iter_jsonl(path: Path):
     with path.open("r", errors="replace") as fh:
         for line in fh:
@@ -164,13 +205,25 @@ def analyze_transcript(transcript_path: str | Path, root: str | None = None) -> 
             name = block.get("name") or ""
             if name == "Bash":
                 # Read-only commands are context gathering, not mutation: count
-                # them as reads so the overhead ratio reflects intent.
+                # them as reads so the overhead ratio reflects intent. Their path
+                # arguments are inspected too, because real sessions explore via
+                # cat/rg/git far more than via the Read tool.
                 cmd = str((block.get("input") or {}).get("command") or "")
-                key = "read" if re.match(
-                    r"^\s*(ls|cat|head|tail|rg|grep|find|git (log|show|diff|status|branch)|wc|tree|file)\b",
+                read_only = bool(re.match(
+                    r"^\s*(ls|cat|head|tail|rg|grep|find|git (log|show|diff|status|branch)|wc|tree|file|bat|less|more|ag|ack)\b",
                     cmd,
-                ) else "bash"
-                sig.tool_counts[key] = sig.tool_counts.get(key, 0) + 1
+                ))
+                if read_only:
+                    sig.tool_counts["read"] = sig.tool_counts.get("read", 0) + 1
+                    for raw_path in bash_context_paths(cmd):
+                        normalized = _normalize(raw_path, root)
+                        counters = seen_paths.setdefault(
+                            normalized, {"reads": 0, "searches": 0, "edits": 0}
+                        )
+                        counters["reads"] += 1
+                        reads.add(normalized)
+                else:
+                    sig.tool_counts["bash"] = sig.tool_counts.get("bash", 0) + 1
             else:
                 category = TOOL_CATEGORY.get(name)
                 if category:
