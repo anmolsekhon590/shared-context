@@ -20,6 +20,7 @@ from . import analyzer, spool
 from .analyzer import Signals
 from .client import Client
 from .config import Config, state_dir
+from .harnesses import HARNESSES, get as get_harness
 from .ids import uuid7_str
 from .repodetect import RepoRef, cwd_hash, detect_repo, hash_path, normalize_path, repo_key
 
@@ -62,25 +63,26 @@ def transcript_path_for(payload: dict, cwd: str, harness_session_id: str) -> str
     return str(candidate) if candidate.exists() else None
 
 
-def _repo_payload(ref: RepoRef, root: str) -> dict:
-    return {"forge": ref.forge, "full_name": ref.full_name, "branch": ref.branch}
-
-
 def _ensure_session(config: Config, payload: dict) -> dict:
     """Find or create the local session record; returns {"ctx_id", ...}."""
+    harness = str(payload.get("harness") or "claude-code")
+    if harness not in HARNESSES:
+        harness = "claude-code"
     harness_id = str(payload.get("session_id") or payload.get("sessionId") or uuid.uuid4().hex)
     cwd = str(payload.get("cwd") or os.getcwd())
     ref = detect_repo(cwd)
     sessions = _load("sessions.json", {})
-    record = sessions.get(harness_id)
+    session_key = f"{harness}:{harness_id}"
+    record = sessions.get(session_key)
     if record and record.get("ctx_id"):
         record.setdefault("ents", {})
         return record
 
     record = {
         "ctx_id": uuid7_str(),
+        "key": session_key,
         "harness_id": harness_id,
-        "harness": "claude-code",
+        "harness": harness,
         "started_at": _now(),
         "cwd": cwd,
         "root": ref.root,
@@ -89,7 +91,7 @@ def _ensure_session(config: Config, payload: dict) -> dict:
         "first_edit_sent": False,
         "transcript": None,
     }
-    sessions[harness_id] = record
+    sessions[session_key] = record
     _save("sessions.json", sessions)
 
     client = Client(config)
@@ -247,6 +249,10 @@ def session_end(config: Config, payload: dict) -> str | None:
     return _update_signals(config, record, payload, ended=True)
 
 
+def _repo_payload(ref: RepoRef, root: str) -> dict:
+    return {"forge": ref.forge, "full_name": ref.full_name, "branch": ref.branch}
+
+
 def _update_signals(config: Config, record: dict, payload: dict, ended: bool) -> str | None:
     cwd = record.get("cwd") or os.getcwd()
     transcript = transcript_path_for(payload, cwd, record["harness_id"])
@@ -257,7 +263,8 @@ def _update_signals(config: Config, record: dict, payload: dict, ended: bool) ->
         branch=record["repo"].get("branch"),
     )
 
-    sig = analyzer.analyze_transcript(transcript, record.get("root")) if transcript else Signals()
+    harness = get_harness(record.get("harness"))
+    sig = harness.parse(transcript, record.get("root"), record.get("cwd")) if transcript else Signals()
     pending = _load(f"pending-{record['ctx_id']}.json", {})
     if sig.prompts == 0 and pending.get("restatement_count"):
         # Transcript unavailable: fall back to the locally accumulated counts.
@@ -278,17 +285,17 @@ def _update_signals(config: Config, record: dict, payload: dict, ended: bool) ->
             config,
             record["ctx_id"],
             "session.first_edit",
-            {"first_edit_at": sig.first_edit_at},
+            {"first_edit_at": sig.first_edit_at, "harness": record.get("harness")},
         )
         sessions = _load("sessions.json", {})
-        if record["harness_id"] in sessions:
-            sessions[record["harness_id"]]["first_edit_sent"] = True
+        if record["key"] in sessions:
+            sessions[record["key"]]["first_edit_sent"] = True
             _save("sessions.json", sessions)
 
     if ended:
         _emit(config, record["ctx_id"], "session.ended", {"reason": payload.get("reason")})
         sessions = _load("sessions.json", {})
-        sessions.pop(record["harness_id"], None)
+        sessions.pop(record["key"], None)
         _save("sessions.json", sessions)
         _state_file(f"pending-{record['ctx_id']}.json").unlink(missing_ok=True)
 

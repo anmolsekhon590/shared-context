@@ -217,7 +217,7 @@ Materialization protocol (client-side): checkout repos@SHA (or worktrees) → ru
 
 ## 7. Installation and consent contract
 
-- `ctx init --harness claude-code --mode observe` writes hook settings + an `AGENTS.md` block and shows **exactly** what is captured and what leaves the machine.
+- `ctx init --harness <claude-code|pi|all> --mode observe` writes hook settings / an extension plus an `AGENTS.md`/`CLAUDE.md` block and shows **exactly** what is captured and what leaves the machine. Harness adapters translate lifecycle events only; analysis and privacy rules are shared (`harnesses/`).
 - Consent is explicit per capability: `transcripts: none|excerpt|full`, `path_signals: hash|off`, `restatement: on|off`. Changing any of them is one command and takes effect next session.
 - Uninstall leaves nothing behind: local spool removed, server objects deleted on request, tombstones written (data model §7).
 

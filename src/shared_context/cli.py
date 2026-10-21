@@ -41,7 +41,7 @@ def login(
 
 @app.command()
 def init(
-    harness: str = typer.Option("claude-code", "--harness"),
+    harness: str = typer.Option("claude-code", "--harness", help="claude-code | pi | all"),
     mode: str = typer.Option("observe", "--mode", help="observe | active"),
     project: Path = typer.Option(Path.cwd(), "--project", "-p", help="Project directory"),
     transcripts: str = typer.Option("none", "--transcripts", help="none | excerpt | full"),
@@ -49,10 +49,18 @@ def init(
     restatement: bool = typer.Option(True, "--restatement/--no-restatement"),
 ) -> None:
     """Install hooks and project instructions. Shows exactly what is captured."""
-    if harness != "claude-code":
-        raise typer.BadParameter("only --harness claude-code is supported right now")
+    from .harnesses import HARNESSES, select
+
+    if harness not in ("all", *HARNESSES):
+        raise typer.BadParameter(f"unknown harness '{harness}'; choose {', '.join(HARNESSES)} or all")
     if mode not in ("observe", "active"):
         raise typer.BadParameter("mode must be observe or active")
+    selected = select(harness)
+    unsupported = [h.name for h in selected if mode == "active" and not h.supports_active]
+    if unsupported:
+        raise typer.BadParameter(
+            f"active mode is not supported yet for: {', '.join(unsupported)} — observe mode works now"
+        )
 
     cfg = Config.load()
     cfg.mode = mode
@@ -60,15 +68,15 @@ def init(
     cfg.path_signals = path_signals
     cfg.restatement = restatement
 
-    from .install import install_claude_code, install_project_doc
+    from .install import install_project_doc
 
-    settings = install_claude_code(mode)
-    doc = install_project_doc(project.resolve(), mode)
+    for h in selected:
+        for path in h.install(mode):
+            typer.echo(f"{h.name:11s} -> {path}")
+        doc = install_project_doc(project.resolve(), mode, prefer=h.doc_preference, ensure=(harness == "all"))
+        typer.echo(f"{h.name:11s} -> {doc}")
     cfg.hooks_installed = True
     cfg.save()
-
-    typer.echo(f"hooks     -> {settings}")
-    typer.echo(f"project   -> {doc}")
     typer.echo("")
     typer.echo("Capture consent:")
     typer.echo("  session timing, tool counts, tokens ...... on   (aggregate numbers)")
@@ -82,19 +90,29 @@ def init(
 
 @app.command()
 def uninstall(
+    harness: str = typer.Option("all", "--harness", help="claude-code | pi | all"),
     project: Path = typer.Option(Path.cwd(), "--project", "-p"),
 ) -> None:
     """Remove hooks and project instructions."""
-    from .install import uninstall_claude_code, uninstall_project_doc
+    from .harnesses import HARNESSES, select
 
-    settings = uninstall_claude_code()
-    removed = uninstall_project_doc(project.resolve())
+    if harness not in ("all", *HARNESSES):
+        raise typer.BadParameter(f"unknown harness '{harness}'; choose {', '.join(HARNESSES)} or all")
+
+    from .install import uninstall_project_doc
+
+    for h in select(harness):
+        removed_paths = h.uninstall()
+        if removed_paths:
+            for path in removed_paths:
+                typer.echo(f"{h.name}: removed {path}")
+        else:
+            typer.echo(f"{h.name}: nothing installed")
+    for doc in uninstall_project_doc(project.resolve()):
+        typer.echo(f"removed block from {doc}")
     cfg = Config.load()
     cfg.hooks_installed = False
     cfg.save()
-    typer.echo(f"hooks removed from {settings}" if settings else "no claude settings found")
-    for doc in removed:
-        typer.echo(f"removed block from {doc}")
 
 
 @app.command()
@@ -172,20 +190,10 @@ def doctor() -> None:
     typer.echo(f"health     : {health(cfg) or 'unreachable'}")
     typer.echo(f"spool      : {spool.size()} queued")
 
-    settings = Path.home() / ".claude" / "settings.json"
-    installed = False
-    if settings.exists():
-        try:
-            hooks = json.loads(settings.read_text()).get("hooks", {})
-            installed = any(
-                "shared_context.cli hook" in str(h.get("command", "")) or "ctx hook" in str(h.get("command", ""))
-                for entries in hooks.values()
-                for entry in entries
-                for h in entry.get("hooks", [])
-            )
-        except ValueError:
-            installed = False
-    typer.echo(f"hooks      : {'installed' if installed else 'not installed'}")
+    from .harnesses import HARNESSES
+
+    for name, h in HARNESSES.items():
+        typer.echo(f"harness    : {name:11s} {'installed' if h.is_installed() else 'not installed'}")
     projects = Path.home() / ".claude" / "projects"
     typer.echo(f"transcripts: {projects if projects.exists() else 'not found'}")
 

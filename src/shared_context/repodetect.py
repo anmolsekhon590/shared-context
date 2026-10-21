@@ -58,12 +58,20 @@ def repo_key(ref: RepoRef) -> str:
     return f"{ref.forge}:{ref.full_name}"
 
 
-def normalize_path(path: str, root: str | None) -> str:
-    """Relative to the repo root when possible; absolute otherwise."""
+def normalize_path(path: str, root: str | None, base: str | None = None) -> str:
+    """Relative to the repo root when possible; absolute otherwise.
+
+    Relative inputs resolve against `base` (the session's working directory),
+    never against the recorder's own cwd — otherwise `src/a.py` from a shell
+    command would become a machine-specific signal and never match a teammate's.
+    """
     if not path:
         return path
     try:
-        abs_path = str(Path(path).expanduser().resolve())
+        p = Path(path).expanduser()
+        if not p.is_absolute() and base:
+            p = Path(base) / p
+        abs_path = str(p.resolve())
     except OSError:
         return path
     if root:

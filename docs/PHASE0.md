@@ -10,9 +10,13 @@ No external logs, no surveys, no prompt text, no raw paths. Metrics come from ev
 docker compose -f deploy/docker-compose.yml up -d
 uv run ctx serve --port 8787 &        # leave running; auto-migrates
 uv run ctx login --server http://127.0.0.1:8787 --token dev-token   # set CTX_API_TOKEN when shared
-uv run ctx init --project /path/to/repo --mode observe
-uv run ctx doctor                      # health, hooks, spool
+uv run ctx init --harness all --mode observe --project /path/to/repo
+uv run ctx doctor                      # health, per-harness install state, spool
 ```
+
+`--harness` accepts `claude-code`, `pi`, or `all`. Both are observe-only in Phase 0;
+the pi extension lives at `~/.pi/agent/extensions/shared-context.ts` and is removed
+cleanly by `ctx uninstall`.
 
 For a shared server: set `CTX_API_TOKEN` to a real secret, and put it behind your VPN/reverse proxy. Phase 0 has a single flat token; per-user OIDC arrives with active mode.
 
@@ -28,7 +32,7 @@ For a shared server: set `CTX_API_TOKEN` to a real secret, and put it behind you
 
 ## 2. Run it (1–2 weeks of normal work)
 
-- 2+ engineers on the **same repo**, working normally. Cross-user numbers require two principals; one person alone can only produce within-user re-derivation.
+- 2+ engineers on the **same repo**, working normally. Cross-user numbers require two principals; one person alone can only produce within-user re-derivation. Harnesses may differ (one on Claude Code, one on pi) — the metrics are computed by the same shared recorder in both.
 - Long enough to see repetition: ~10+ sessions per person, or one week minimum.
 - Offline/blocked? `ctx spool status` / `ctx spool flush`. Hooks never block a session.
 - Check in mid-week: `ctx report --days 7`.

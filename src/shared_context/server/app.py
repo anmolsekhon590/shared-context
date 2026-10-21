@@ -159,7 +159,11 @@ def get_session(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="not found")
-    return row
+    # bytea columns (cwd_hash) are not JSON-serializable; expose them as hex.
+    return {
+        key: bytes(value).hex() if isinstance(value, (bytes, bytearray, memoryview)) else value
+        for key, value in row.items()
+    }
 
 
 @app.exception_handler(psycopg.Error)

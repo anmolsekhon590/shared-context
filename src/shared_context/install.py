@@ -1,93 +1,34 @@
-"""Harness installation: hooks, AGENTS.md block, consent switches."""
+"""Project-facing install helpers shared by harness adapters.
+
+Harness-specific wiring (settings.json, pi extensions) lives in
+`shared_context.harnesses.*`; this module only handles the instruction-file
+block and the `ctx` executable path used in generated hook configs.
+"""
 
 from __future__ import annotations
 
-import json
 import shlex
 import shutil
 import sys
-import time
 from pathlib import Path
 
-HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PreCompact", "Stop", "SessionEnd"]
 BLOCK_BEGIN = "<!-- shared-context:begin -->"
 BLOCK_END = "<!-- shared-context:end -->"
-MARKER = "shared_context.cli hook"
+
+
+def ctx_argv() -> list[str]:
+    """Absolute argv prefix that runs the ctx CLI, usable from hook configs."""
+    argv0 = Path(sys.argv[0]).resolve()
+    if argv0.name == "ctx":
+        return [str(argv0)]
+    found = shutil.which("ctx")
+    if found:
+        return [str(Path(found).resolve())]
+    return [sys.executable, "-m", "shared_context.cli"]
 
 
 def hook_command(event: str) -> str:
-    argv0 = Path(sys.argv[0]).resolve()
-    if argv0.name == "ctx":
-        return f"{shlex.quote(str(argv0))} hook {event}"
-    if shutil.which("ctx"):
-        return f"{shlex.quote(str(Path(shutil.which('ctx')).resolve()))} hook {event}"
-    return f"{shlex.quote(sys.executable)} -m shared_context.cli hook {event}"
-
-
-def _event_slug(event: str) -> str:
-    return {
-        "SessionStart": "session-start",
-        "UserPromptSubmit": "user-prompt-submit",
-        "PreCompact": "pre-compact",
-        "Stop": "stop",
-        "SessionEnd": "session-end",
-    }[event]
-
-
-def _is_ours(entry: dict) -> bool:
-    for hook in entry.get("hooks") or []:
-        if MARKER in str(hook.get("command", "")) or "ctx hook" in str(hook.get("command", "")):
-            return True
-    return False
-
-
-def _settings_path() -> Path:
-    return Path.home() / ".claude" / "settings.json"
-
-
-def install_claude_code(mode: str) -> Path:
-    path = _settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        backup = path.with_suffix(f".json.bak.{int(time.time())}")
-        shutil.copy2(path, backup)
-        settings = json.loads(path.read_text() or "{}")
-    else:
-        settings = {}
-    hooks = settings.setdefault("hooks", {})
-    for event in HOOK_EVENTS:
-        entries = [e for e in hooks.get(event, []) if not _is_ours(e)]
-        entries.append(
-            {
-                "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": hook_command(_event_slug(event)),
-                        "timeout": 30 if event in ("Stop", "SessionEnd") else 10,
-                    }
-                ],
-            }
-        )
-        hooks[event] = entries
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-    return path
-
-
-def uninstall_claude_code() -> Path | None:
-    path = _settings_path()
-    if not path.exists():
-        return None
-    settings = json.loads(path.read_text() or "{}")
-    hooks = settings.get("hooks", {})
-    for event in list(hooks):
-        hooks[event] = [e for e in hooks[event] if not _is_ours(e)]
-        if not hooks[event]:
-            del hooks[event]
-    if not hooks:
-        settings.pop("hooks", None)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
-    return path
+    return " ".join(shlex.quote(part) for part in [*ctx_argv(), "hook", event])
 
 
 def agents_block(mode: str) -> str:
@@ -111,13 +52,32 @@ def agents_block(mode: str) -> str:
     return f"{BLOCK_BEGIN}\n{body}\n{BLOCK_END}\n"
 
 
-def install_project_doc(project: Path, mode: str) -> Path:
+def install_project_doc(
+    project: Path,
+    mode: str,
+    prefer: str = "CLAUDE.md",
+    ensure: bool = False,
+) -> Path:
+    """Write the consent/instructions block into the harness's native doc.
+
+    Without `ensure`, an existing sibling doc is used rather than creating a
+    new file (so a repo that standardized on AGENTS.md stays that way). With
+    `ensure`, the preferred file is created even if a sibling exists — used
+    when installing for several harnesses at once.
+    """
     project.mkdir(parents=True, exist_ok=True)
-    existing_md = project / "CLAUDE.md"
-    target = existing_md if existing_md.exists() else project / "AGENTS.md"
+    preferred = project / prefer
+    other = project / ("AGENTS.md" if prefer == "CLAUDE.md" else "CLAUDE.md")
+    if preferred.exists():
+        target = preferred
+    elif other.exists() and not ensure:
+        target = other
+    else:
+        target = preferred
+
     block = agents_block(mode)
     text = target.read_text() if target.exists() else ""
-    if BLOCK_BEGIN in text:
+    if BLOCK_BEGIN in text and BLOCK_END in text:
         start = text.index(BLOCK_BEGIN)
         end = text.index(BLOCK_END) + len(BLOCK_END)
         text = text[:start] + block.rstrip("\n") + text[end:]

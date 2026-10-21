@@ -26,13 +26,14 @@ TOOL_CATEGORY = {
     "WebSearch": "web",
 }
 
-EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}
-PATH_SOURCES = {"Read": "reads", "Grep": "searches", "Glob": "searches", "Edit": "edits", "Write": "edits"}
-
 MAX_TRANSCRIPT_BYTES = 20 * 1024 * 1024
 
 BASH_PATH_COMMANDS = {"cat", "head", "tail", "wc", "file", "tree", "ls", "find", "bat", "less", "more"}
 BASH_SEARCH_COMMANDS = {"rg", "grep", "ag", "ack"}
+BASH_READ_ONLY_RE = re.compile(
+    r"^\s*(ls|cat|head|tail|rg|grep|find|git (log|show|diff|status|branch)|wc|tree|file|bat|less|more|ag|ack)\b"
+)
+CANONICAL_PATH_KEYS = {"read": "reads", "edit": "edits", "search": "searches"}
 
 # Conservative, explainable restatement rules. No model, no prompt text stored.
 RESTATEMENT_RULES: list[tuple[str, re.Pattern, float]] = [
@@ -153,7 +154,77 @@ def _iter_jsonl(path: Path):
                 continue
 
 
-def analyze_transcript(transcript_path: str | Path, root: str | None = None) -> Signals:
+@dataclass
+class ToolRecorder:
+    """Canonical tool-call accounting shared by every harness parser.
+
+    Both parsers must produce identical metrics for identical behavior, or
+    cross-harness comparisons are meaningless. Harness code only maps its tool
+    names to canonical categories and hands over the arguments.
+    """
+
+    sig: Signals
+    root: str | None = None
+    cwd: str | None = None
+    reads: set[str] = field(default_factory=set)
+    edits: set[str] = field(default_factory=set)
+    seen_paths: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def record(self, canonical: str, tool_input: dict, timestamp: str | None = None) -> None:
+        if canonical == "bash":
+            cmd = str(tool_input.get("command") or "")
+            if BASH_READ_ONLY_RE.match(cmd):
+                # Context gathering, not mutation: count as a read and inspect
+                # path arguments, because real sessions explore via cat/rg/git
+                # far more than via dedicated read tools.
+                self.sig.tool_counts["read"] = self.sig.tool_counts.get("read", 0) + 1
+                for raw_path in bash_context_paths(cmd):
+                    self._path(raw_path, "reads")
+            else:
+                self.sig.tool_counts["bash"] = self.sig.tool_counts.get("bash", 0) + 1
+            return
+
+        self.sig.tool_counts[canonical] = self.sig.tool_counts.get(canonical, 0) + 1
+        if canonical == "edit" and self.sig.first_edit_at is None and timestamp:
+            self.sig.first_edit_at = timestamp
+        raw = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path")
+        key = CANONICAL_PATH_KEYS.get(canonical)
+        if raw and key:
+            self._path(str(raw), key)
+
+    def _path(self, raw: str, key: str) -> None:
+        # Fall back to the repo root when the session cwd is unknown: relative
+        # bash paths are normally relative to the repo root anyway.
+        normalized = _normalize(raw, self.root, self.cwd or self.root)
+        counters = self.seen_paths.setdefault(normalized, {"reads": 0, "searches": 0, "edits": 0})
+        counters[key] += 1
+        if key == "reads":
+            self.reads.add(normalized)
+        elif key == "edits":
+            self.edits.add(normalized)
+
+    def finish(self) -> None:
+        self.sig.files_read = len(self.reads)
+        self.sig.files_edited = len(self.edits)
+        self.sig.paths = self.seen_paths
+        self.sig._ratio()
+
+
+def add_usage(
+    sig: Signals,
+    input_tokens: int | None = 0,
+    output_tokens: int | None = 0,
+    cache_read: int | None = 0,
+    cache_write: int | None = 0,
+) -> None:
+    """Cache reads/writes are input: they are tokens the provider processed."""
+    sig.tokens_in += int(input_tokens or 0) + int(cache_read or 0) + int(cache_write or 0)
+    sig.tokens_out += int(output_tokens or 0)
+
+
+def analyze_transcript(
+    transcript_path: str | Path, root: str | None = None, cwd: str | None = None
+) -> Signals:
     """Parse a Claude Code JSONL transcript into aggregate signals."""
     sig = Signals()
     path = Path(transcript_path)
@@ -162,9 +233,7 @@ def analyze_transcript(transcript_path: str | Path, root: str | None = None) -> 
     if path.stat().st_size > MAX_TRANSCRIPT_BYTES:
         return sig  # too large for per-turn parsing; skip rather than stall the hook
 
-    reads: set[str] = set()
-    edits: set[str] = set()
-    seen_paths: dict[str, dict[str, int]] = {}
+    rec = ToolRecorder(sig, root, cwd)
     prompt_index = 0
 
     for entry in _iter_jsonl(path):
@@ -190,73 +259,29 @@ def analyze_transcript(transcript_path: str | Path, root: str | None = None) -> 
             continue
 
         usage = message.get("usage") or {}
-        sig.tokens_in += int(
-            (usage.get("input_tokens") or 0)
-            + (usage.get("cache_read_input_tokens") or 0)
-            + (usage.get("cache_creation_input_tokens") or 0)
+        add_usage(
+            sig,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cache_read=usage.get("cache_read_input_tokens"),
+            cache_write=usage.get("cache_creation_input_tokens"),
         )
-        sig.tokens_out += int(usage.get("output_tokens") or 0)
 
         if not isinstance(content, list):
             continue
         for block in content:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
-            name = block.get("name") or ""
-            if name == "Bash":
-                # Read-only commands are context gathering, not mutation: count
-                # them as reads so the overhead ratio reflects intent. Their path
-                # arguments are inspected too, because real sessions explore via
-                # cat/rg/git far more than via the Read tool.
-                cmd = str((block.get("input") or {}).get("command") or "")
-                read_only = bool(re.match(
-                    r"^\s*(ls|cat|head|tail|rg|grep|find|git (log|show|diff|status|branch)|wc|tree|file|bat|less|more|ag|ack)\b",
-                    cmd,
-                ))
-                if read_only:
-                    sig.tool_counts["read"] = sig.tool_counts.get("read", 0) + 1
-                    for raw_path in bash_context_paths(cmd):
-                        normalized = _normalize(raw_path, root)
-                        counters = seen_paths.setdefault(
-                            normalized, {"reads": 0, "searches": 0, "edits": 0}
-                        )
-                        counters["reads"] += 1
-                        reads.add(normalized)
-                else:
-                    sig.tool_counts["bash"] = sig.tool_counts.get("bash", 0) + 1
-            else:
-                category = TOOL_CATEGORY.get(name)
-                if category:
-                    sig.tool_counts[category] = sig.tool_counts.get(category, 0) + 1
-            if name in EDIT_TOOLS and sig.first_edit_at is None:
-                ts = entry.get("timestamp")
-                if ts:
-                    sig.first_edit_at = ts
+            canonical = TOOL_CATEGORY.get(block.get("name") or "")
+            if canonical:
+                rec.record(canonical, block.get("input") or {}, entry.get("timestamp"))
 
-            inp = block.get("input") or {}
-            raw = inp.get("file_path") or inp.get("path") or inp.get("notebook_path")
-            if not raw:
-                continue
-            normalized = _normalize(raw, root)
-            counter_key = PATH_SOURCES.get(name)
-            if not counter_key:
-                continue
-            counters = seen_paths.setdefault(normalized, {"reads": 0, "searches": 0, "edits": 0})
-            counters[counter_key] += 1
-            if counter_key == "reads":
-                reads.add(normalized)
-            elif counter_key == "edits":
-                edits.add(normalized)
-
-    sig.files_read = len(reads)
-    sig.files_edited = len(edits)
-    sig.paths = seen_paths
-    sig._ratio()
+    rec.finish()
     return sig
 
 
-def _normalize(raw: str, root: str | None) -> str:
+def _normalize(raw: str, root: str | None, base: str | None = None) -> str:
     # Imported lazily to keep this module dependency-light for the hook path.
     from .repodetect import normalize_path
 
-    return normalize_path(raw, root)
+    return normalize_path(raw, root, base)
