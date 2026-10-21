@@ -1,0 +1,20 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: shared-context-db
+    environment:
+      POSTGRES_USER: ctx
+      POSTGRES_PASSWORD: ctx
+      POSTGRES_DB: ctx
+    ports:
+      - "55432:5432"
+    volumes:
+      - ctxdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ctx -d ctx"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  ctxdata:
